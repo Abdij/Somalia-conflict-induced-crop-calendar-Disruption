@@ -1,28 +1,26 @@
 /**************************************************************
  SOMALIA AGRICULTURAL CALENDAR DISRUPTION ANALYSIS
- Conflict + displacement impacts on cropping calendar
+ Conflict and displacement impacts on farming calendar
  Google Earth Engine JavaScript API
 
  PURPOSE
- Show how conflict and displacement affect:
- - land preparation
- - sowing
- - crop development
- - harvesting
+ Show how conflict and displacement affect agricultural timing
+ in Somalia by identifying how many displaced people came
+ from agricultural areas during key Gu and Deyr calendar stages.
 
- FOCUS
- NOT yield loss.
- Instead:
- identify agricultural areas where conflict/displacement
- likely delayed or disrupted seasonal farming activities.
+ MAIN OUTPUTS
+ 1. Displaced people from agricultural areas by calendar stage
+ 2. ACLED conflict events by calendar stage
+ 3. District summary using Somalia district boundaries
+ 4. Map layers for conflict and displacement origin points
 
- DATA NEEDED
- 1. ACLED Somalia as GEE table asset
- 2. IOM DTM Somalia ETT as GEE table asset
+ REQUIRED USER ASSETS
+ - ACLED Somalia table asset
+ - IOM DTM Somalia ETT table asset
 
  IMPORTANT
- - Replace asset IDs below
- - DTM Excel should be exported to CSV before upload
+ - Replace the asset IDs below with your own
+ - Export the DTM Excel file to CSV before uploading to GEE
 **************************************************************/
 
 // =====================================================
@@ -31,18 +29,18 @@
 var SETTINGS = {
   targetYear: 2024,
   scale: 10,
-  riskBufferMeters: 5000,
+  conflictBufferMeters: 5000,   // for visualization only if needed
 
+  // Replace with your actual uploaded Earth Engine assets
   // Replace with your own assets
   acledAsset: 'projects/studious-legend-447918-u1/assets/ACLED_Somalia_2024_2025',
   dtmAsset: 'projects/studious-legend-447918-u1/assets/IOM_DTM_ETT_Somalia',
 
-  ndviThreshold: 0.40,
-  guActiveThreshold: 0.45,
-  deyrActiveThreshold: 0.40,
+  // NDVI thresholds for seasonal activity masks
+  guActiveThreshold: 0.30,
+  deyrActiveThreshold: 0.28,
 
-  // Somalia seasonal calendar windows
-  // You can adjust these if needed for your study
+  // Agricultural calendar windows
   gu: {
     landprepStart: '2024-02-01',
     landprepEnd:   '2024-03-31',
@@ -68,12 +66,18 @@ var SETTINGS = {
 
 
 // =====================================================
-// 2. BOUNDARIES
+// 2. SOMALIA BOUNDARIES AND DISTRICTS
 // =====================================================
+// National boundary
 var countries = ee.FeatureCollection('USDOS/LSIB_SIMPLE/2017');
 var somalia = countries.filter(ee.Filter.eq('country_na', 'Somalia')).geometry();
 
+// Somalia district boundaries from FAO GAUL Level 2
 var districts = ee.FeatureCollection('FAO/GAUL/2015/level2')
+  .filter(ee.Filter.eq('ADM0_NAME', 'Somalia'));
+
+// Optional region boundaries if needed later
+var regions = ee.FeatureCollection('FAO/GAUL/2015/level1')
   .filter(ee.Filter.eq('ADM0_NAME', 'Somalia'));
 
 Map.centerObject(somalia, 6);
@@ -81,14 +85,15 @@ Map.setOptions('SATELLITE');
 
 
 // =====================================================
-// 3. CROPLAND PRIOR
+// 3. AGRICULTURAL MASK
 // =====================================================
+// ESA WorldCover cropland class = 40
 var worldcover = ee.ImageCollection('ESA/WorldCover/v200').first();
 var cropland = worldcover.select('Map').eq(40).clip(somalia).selfMask();
 
 
 // =====================================================
-// 4. SENTINEL-2 PREP
+// 4. SENTINEL-2 PREPARATION
 // =====================================================
 function maskS2clouds(img) {
   var qa = img.select('QA60');
@@ -116,8 +121,11 @@ var s2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
 
 
 // =====================================================
-// 5. SEASONAL ACTIVITY MAPS
+// 5. SEASONAL AGRICULTURAL ACTIVITY
 // =====================================================
+// For land preparation and sowing we will use cropland prior.
+// For growing and harvest we use active seasonal vegetation masks.
+
 function seasonalPeak(startDate, endDate, threshold) {
   var peak = s2
     .filterDate(startDate, endDate)
@@ -126,37 +134,35 @@ function seasonalPeak(startDate, endDate, threshold) {
     .clip(somalia);
 
   var active = peak.gt(threshold).selfMask().updateMask(cropland);
+
   return {
     peak: peak,
     active: active
   };
 }
 
-// GU agriculture activity
 var guSeason = seasonalPeak('2024-03-01', '2024-07-31', SETTINGS.guActiveThreshold);
-
-// DEYR agriculture activity
 var deyrSeason = seasonalPeak('2024-10-01', '2025-01-31', SETTINGS.deyrActiveThreshold);
 
-var guActive = guSeason.active;
-var deyrActive = deyrSeason.active;
 var guPeak = guSeason.peak;
 var deyrPeak = deyrSeason.peak;
 
+var guActive = guSeason.active;
+var deyrActive = deyrSeason.active;
+
 
 // =====================================================
-// 6. LOAD ACLED
+// 6. LOAD ACLED AND ALIGN TO DISTRICTS
 // =====================================================
 var acledRaw = ee.FeatureCollection(SETTINGS.acledAsset)
   .filterBounds(somalia);
 
-// Parse ACLED event date
+// Parse ACLED date and keep main conflict event types
 var acled = acledRaw.map(function(f) {
-  var date = ee.Date.parse('yyyy-MM-dd', ee.String(f.get('event_date')));
-  return f.set('eventDateParsed', date.millis());
+  var parsedDate = ee.Date.parse('yyyy-MM-dd', ee.String(f.get('event_date')));
+  return f.set('eventDateParsed', parsedDate.millis());
 });
 
-// Keep main conflict-related event types
 var acledConflict = acled.filter(
   ee.Filter.inList('event_type', [
     'Battles',
@@ -166,13 +172,32 @@ var acledConflict = acled.filter(
   ])
 );
 
+// Spatially align ACLED points to Somalia districts
+var acledWithDistrict = acledConflict.map(function(f) {
+  var match = districts.filterBounds(f.geometry()).first();
+  return f.set({
+    district_name: ee.Algorithms.If(match, match.get('ADM2_NAME'), null),
+    region_name: ee.Algorithms.If(match, match.get('ADM1_NAME'), null)
+  });
+});
+
 
 // =====================================================
 // 7. LOAD DTM AND BUILD ORIGIN GEOMETRY
 // =====================================================
+// DTM columns from your uploaded file include:
+// - Orgin latitude
+// - Orgin longitude
+// - current latitude
+// - current longtiude
+// - Date of Assessment
+// - Main Cause of Displacement
+// - Total new arrivals since last week
+
 var dtmRaw = ee.FeatureCollection(SETTINGS.dtmAsset)
   .filterBounds(somalia);
 
+// Helper to clean number strings
 function parseMaybeNumber(val) {
   var s = ee.String(ee.Algorithms.If(val, val, ''));
   s = s.replace(',', '');
@@ -180,9 +205,12 @@ function parseMaybeNumber(val) {
   return ee.Number.parse(s);
 }
 
+// Build origin geometry when origin coordinates exist.
+// If missing, fall back to current coordinates.
 var dtmPoints = dtmRaw.map(function(f) {
   var originLatStr = ee.String(ee.Algorithms.If(f.get('Orgin latitude'), f.get('Orgin latitude'), ''));
   var originLonStr = ee.String(ee.Algorithms.If(f.get('Orgin longitude'), f.get('Orgin longitude'), ''));
+
   var currLat = f.get('current latitude');
   var currLon = f.get('current longtiude');
 
@@ -190,26 +218,43 @@ var dtmPoints = dtmRaw.map(function(f) {
   var hasOriginLon = originLonStr.length().gt(0);
   var hasOrigin = hasOriginLat.and(hasOriginLon);
 
-  var lat = ee.Algorithms.If(hasOrigin, parseMaybeNumber(originLatStr), currLat);
-  var lon = ee.Algorithms.If(hasOrigin, parseMaybeNumber(originLonStr), currLon);
+  var finalLat = ee.Algorithms.If(hasOrigin, parseMaybeNumber(originLatStr), currLat);
+  var finalLon = ee.Algorithms.If(hasOrigin, parseMaybeNumber(originLonStr), currLon);
 
-  var geom = ee.Geometry.Point([ee.Number(lon), ee.Number(lat)]);
+  var geom = ee.Geometry.Point([ee.Number(finalLon), ee.Number(finalLat)]);
 
-  var dateParsed = ee.Date.parse('M/d/yyyy', ee.String(f.get('Date of Assessment')));
+  var rawDate = ee.String(ee.Algorithms.If(f.get('Date of Assessment'), f.get('Date of Assessment'), ''));
+  var parsedDate = ee.Date.parse('M/d/yyyy', rawDate);
 
   return ee.Feature(geom, f.toDictionary())
-    .set('dtmDateParsed', dateParsed.millis())
-    .set('used_origin_geometry', hasOrigin);
+    .set('dtmDateParsed', parsedDate.millis())
+    .set('used_origin_geometry', hasOrigin)
+    .set('origin_or_current_lat', finalLat)
+    .set('origin_or_current_lon', finalLon);
 });
 
-// Keep conflict displacement only if you want strict conflict-related displacement
-var dtmConflict = dtmPoints.filter(
+// Keep only records with positive arrivals
+var dtmValid = dtmPoints.filter(
+  ee.Filter.gt('Total new arrivals since last week', 0)
+);
+
+// Optional: strict conflict-caused displacement only
+var dtmConflict = dtmValid.filter(
   ee.Filter.eq('Main Cause of Displacement', 'Conflict')
 );
 
+// Spatially align DTM points to districts
+var dtmWithDistrict = dtmConflict.map(function(f) {
+  var match = districts.filterBounds(f.geometry()).first();
+  return f.set({
+    district_name: ee.Algorithms.If(match, match.get('ADM2_NAME'), null),
+    region_name: ee.Algorithms.If(match, match.get('ADM1_NAME'), null)
+  });
+});
+
 
 // =====================================================
-// 8. DATE FILTER FUNCTIONS
+// 8. TIME FILTER FUNCTIONS
 // =====================================================
 function filterAcledByWindow(fc, startDate, endDate) {
   var start = ee.Date(startDate).millis();
@@ -225,165 +270,39 @@ function filterDTMByWindow(fc, startDate, endDate) {
            .filter(ee.Filter.lte('dtmDateParsed', end));
 }
 
-function bufferPoints(fc, meters) {
-  return fc.map(function(f) {
-    return f.buffer(meters).copyProperties(f);
-  });
-}
+
+// =====================================================
+// 9. CALENDAR-SPECIFIC ACLED AND DTM SETS
+// =====================================================
+// GU
+var guLandprepConflict = filterAcledByWindow(acledWithDistrict, SETTINGS.gu.landprepStart, SETTINGS.gu.landprepEnd);
+var guSowingConflict   = filterAcledByWindow(acledWithDistrict, SETTINGS.gu.sowingStart, SETTINGS.gu.sowingEnd);
+var guGrowingConflict  = filterAcledByWindow(acledWithDistrict, SETTINGS.gu.growingStart, SETTINGS.gu.growingEnd);
+var guHarvestConflict  = filterAcledByWindow(acledWithDistrict, SETTINGS.gu.harvestStart, SETTINGS.gu.harvestEnd);
+
+var guLandprepDTM = filterDTMByWindow(dtmWithDistrict, SETTINGS.gu.landprepStart, SETTINGS.gu.landprepEnd);
+var guSowingDTM   = filterDTMByWindow(dtmWithDistrict, SETTINGS.gu.sowingStart, SETTINGS.gu.sowingEnd);
+var guGrowingDTM  = filterDTMByWindow(dtmWithDistrict, SETTINGS.gu.growingStart, SETTINGS.gu.growingEnd);
+var guHarvestDTM  = filterDTMByWindow(dtmWithDistrict, SETTINGS.gu.harvestStart, SETTINGS.gu.harvestEnd);
+
+// DEYR
+var deyrLandprepConflict = filterAcledByWindow(acledWithDistrict, SETTINGS.deyr.landprepStart, SETTINGS.deyr.landprepEnd);
+var deyrSowingConflict   = filterAcledByWindow(acledWithDistrict, SETTINGS.deyr.sowingStart, SETTINGS.deyr.sowingEnd);
+var deyrGrowingConflict  = filterAcledByWindow(acledWithDistrict, SETTINGS.deyr.growingStart, SETTINGS.deyr.growingEnd);
+var deyrHarvestConflict  = filterAcledByWindow(acledWithDistrict, SETTINGS.deyr.harvestStart, SETTINGS.deyr.harvestEnd);
+
+var deyrLandprepDTM = filterDTMByWindow(dtmWithDistrict, SETTINGS.deyr.landprepStart, SETTINGS.deyr.landprepEnd);
+var deyrSowingDTM   = filterDTMByWindow(dtmWithDistrict, SETTINGS.deyr.sowingStart, SETTINGS.deyr.sowingEnd);
+var deyrGrowingDTM  = filterDTMByWindow(dtmWithDistrict, SETTINGS.deyr.growingStart, SETTINGS.deyr.growingEnd);
+var deyrHarvestDTM  = filterDTMByWindow(dtmWithDistrict, SETTINGS.deyr.harvestStart, SETTINGS.deyr.harvestEnd);
 
 
 // =====================================================
-// 9. CALENDAR-SPECIFIC EVENT SETS
+// 10. TAG DTM ORIGIN POINTS INSIDE AGRICULTURAL AREAS
 // =====================================================
+// For land prep and sowing use cropland prior.
+// For growing and harvest use seasonal active mask.
 
-// ---------- GU ----------
-var guLandprepConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.gu.landprepStart, SETTINGS.gu.landprepEnd
-);
-var guSowingConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.gu.sowingStart, SETTINGS.gu.sowingEnd
-);
-var guGrowingConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.gu.growingStart, SETTINGS.gu.growingEnd
-);
-var guHarvestConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.gu.harvestStart, SETTINGS.gu.harvestEnd
-);
-
-var guLandprepDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.gu.landprepStart, SETTINGS.gu.landprepEnd
-);
-var guSowingDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.gu.sowingStart, SETTINGS.gu.sowingEnd
-);
-var guGrowingDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.gu.growingStart, SETTINGS.gu.growingEnd
-);
-var guHarvestDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.gu.harvestStart, SETTINGS.gu.harvestEnd
-);
-
-// ---------- DEYR ----------
-var deyrLandprepConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.deyr.landprepStart, SETTINGS.deyr.landprepEnd
-);
-var deyrSowingConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.deyr.sowingStart, SETTINGS.deyr.sowingEnd
-);
-var deyrGrowingConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.deyr.growingStart, SETTINGS.deyr.growingEnd
-);
-var deyrHarvestConflict = filterAcledByWindow(
-  acledConflict, SETTINGS.deyr.harvestStart, SETTINGS.deyr.harvestEnd
-);
-
-var deyrLandprepDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.deyr.landprepStart, SETTINGS.deyr.landprepEnd
-);
-var deyrSowingDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.deyr.sowingStart, SETTINGS.deyr.sowingEnd
-);
-var deyrGrowingDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.deyr.growingStart, SETTINGS.deyr.growingEnd
-);
-var deyrHarvestDTM = filterDTMByWindow(
-  dtmConflict, SETTINGS.deyr.harvestStart, SETTINGS.deyr.harvestEnd
-);
-
-
-// =====================================================
-// 10. DISRUPTION ZONES
-// =====================================================
-function makeDisruptionZone(conflictFC, dtmFC) {
-  var conflictBuf = bufferPoints(conflictFC, SETTINGS.riskBufferMeters);
-  var dtmBuf = bufferPoints(dtmFC, SETTINGS.riskBufferMeters);
-  var merged = ee.FeatureCollection(conflictBuf.merge(dtmBuf));
-
-  return ee.Algorithms.If(
-    merged.size().gt(0),
-    merged.union().geometry(),
-    ee.Geometry.MultiPolygon([])
-  );
-}
-
-// GU zones
-var guLandprepZone = ee.Geometry(makeDisruptionZone(guLandprepConflict, guLandprepDTM));
-var guSowingZone = ee.Geometry(makeDisruptionZone(guSowingConflict, guSowingDTM));
-var guGrowingZone = ee.Geometry(makeDisruptionZone(guGrowingConflict, guGrowingDTM));
-var guHarvestZone = ee.Geometry(makeDisruptionZone(guHarvestConflict, guHarvestDTM));
-
-// DEYR zones
-var deyrLandprepZone = ee.Geometry(makeDisruptionZone(deyrLandprepConflict, deyrLandprepDTM));
-var deyrSowingZone = ee.Geometry(makeDisruptionZone(deyrSowingConflict, deyrSowingDTM));
-var deyrGrowingZone = ee.Geometry(makeDisruptionZone(deyrGrowingConflict, deyrGrowingDTM));
-var deyrHarvestZone = ee.Geometry(makeDisruptionZone(deyrHarvestConflict, deyrHarvestDTM));
-
-function zoneToImage(zone) {
-  return ee.Image.constant(1).clip(zone).selfMask();
-}
-
-var guLandprepZoneImg = zoneToImage(guLandprepZone);
-var guSowingZoneImg = zoneToImage(guSowingZone);
-var guGrowingZoneImg = zoneToImage(guGrowingZone);
-var guHarvestZoneImg = zoneToImage(guHarvestZone);
-
-var deyrLandprepZoneImg = zoneToImage(deyrLandprepZone);
-var deyrSowingZoneImg = zoneToImage(deyrSowingZone);
-var deyrGrowingZoneImg = zoneToImage(deyrGrowingZone);
-var deyrHarvestZoneImg = zoneToImage(deyrHarvestZone);
-
-
-// =====================================================
-// 11. AGRICULTURAL CALENDAR DISRUPTION MAPS
-// =====================================================
-// These are the key outputs:
-// active agricultural areas exposed to conflict/displacement
-// during specific farming windows.
-
-var guLandprepDisrupted = guActive.updateMask(guLandprepZoneImg);
-var guSowingDisrupted = guActive.updateMask(guSowingZoneImg);
-var guGrowingDisrupted = guActive.updateMask(guGrowingZoneImg);
-var guHarvestDisrupted = guActive.updateMask(guHarvestZoneImg);
-
-var deyrLandprepDisrupted = deyrActive.updateMask(deyrLandprepZoneImg);
-var deyrSowingDisrupted = deyrActive.updateMask(deyrSowingZoneImg);
-var deyrGrowingDisrupted = deyrActive.updateMask(deyrGrowingZoneImg);
-var deyrHarvestDisrupted = deyrActive.updateMask(deyrHarvestZoneImg);
-
-
-// =====================================================
-// 12. AREA OF DISRUPTION (HECTARES OF CALENDAR EXPOSURE)
-// =====================================================
-// This is NOT yield loss.
-// It is area where agricultural activities were exposed to disruption.
-
-var haImage = ee.Image.pixelArea().divide(10000).rename('ha');
-
-function calcAreaHa(maskImage, geometry) {
-  return ee.Number(
-    haImage.updateMask(maskImage).reduceRegion({
-      reducer: ee.Reducer.sum(),
-      geometry: geometry,
-      scale: SETTINGS.scale,
-      maxPixels: 1e13
-    }).get('ha')
-  );
-}
-
-var guLandprepHa = calcAreaHa(guLandprepDisrupted, somalia);
-var guSowingHa = calcAreaHa(guSowingDisrupted, somalia);
-var guGrowingHa = calcAreaHa(guGrowingDisrupted, somalia);
-var guHarvestHa = calcAreaHa(guHarvestDisrupted, somalia);
-
-var deyrLandprepHa = calcAreaHa(deyrLandprepDisrupted, somalia);
-var deyrSowingHa = calcAreaHa(deyrSowingDisrupted, somalia);
-var deyrGrowingHa = calcAreaHa(deyrGrowingDisrupted, somalia);
-var deyrHarvestHa = calcAreaHa(deyrHarvestDisrupted, somalia);
-
-
-// =====================================================
-// 13. DISPLACEMENT FROM ACTIVE AGRICULTURAL AREAS
-// =====================================================
 function tagPointInCrop(fc, cropMask, outField) {
   return fc.map(function(f) {
     var val = cropMask.rename('crop').reduceRegion({
@@ -397,70 +316,173 @@ function tagPointInCrop(fc, cropMask, outField) {
   });
 }
 
-var guDTMInAg = tagPointInCrop(guSowingDTM, guActive, 'in_gu_ag')
-  .filter(ee.Filter.eq('in_gu_ag', 1));
+// GU
+var guLandprepDTMInAg = tagPointInCrop(guLandprepDTM, cropland, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
 
-var deyrDTMInAg = tagPointInCrop(deyrSowingDTM, deyrActive, 'in_deyr_ag')
-  .filter(ee.Filter.eq('in_deyr_ag', 1));
+var guSowingDTMInAg = tagPointInCrop(guSowingDTM, cropland, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
 
-var guDisplacedPeople = ee.Number(guDTMInAg.aggregate_sum('Total new arrivals since last week'));
-var deyrDisplacedPeople = ee.Number(deyrDTMInAg.aggregate_sum('Total new arrivals since last week'));
+var guGrowingDTMInAg = tagPointInCrop(guGrowingDTM, guActive, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
+
+var guHarvestDTMInAg = tagPointInCrop(guHarvestDTM, guActive, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
+
+// DEYR
+var deyrLandprepDTMInAg = tagPointInCrop(deyrLandprepDTM, cropland, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
+
+var deyrSowingDTMInAg = tagPointInCrop(deyrSowingDTM, cropland, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
+
+var deyrGrowingDTMInAg = tagPointInCrop(deyrGrowingDTM, deyrActive, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
+
+var deyrHarvestDTMInAg = tagPointInCrop(deyrHarvestDTM, deyrActive, 'in_ag')
+  .filter(ee.Filter.eq('in_ag', 1));
 
 
 // =====================================================
-// 14. DISTRICT SUMMARY
+// 11. NATIONAL COUNTS OF DISPLACED PEOPLE FROM AG AREAS
 // =====================================================
-function sumAreaByDistrict(maskImage, districtsFC, outField) {
-  var img = ee.Image.pixelArea().divide(10000).rename(outField).updateMask(maskImage);
-  return img.reduceRegions({
-    collection: districtsFC,
-    reducer: ee.Reducer.sum(),
-    scale: SETTINGS.scale
-  });
-}
+var guLandprepDisplaced = ee.Number(
+  guLandprepDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
 
-var guLandprepDistrict = sumAreaByDistrict(guLandprepDisrupted, districts, 'gu_landprep_ha');
-var guSowingDistrict = sumAreaByDistrict(guSowingDisrupted, districts, 'gu_sowing_ha');
-var guHarvestDistrict = sumAreaByDistrict(guHarvestDisrupted, districts, 'gu_harvest_ha');
+var guSowingDisplaced = ee.Number(
+  guSowingDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
 
-var deyrLandprepDistrict = sumAreaByDistrict(deyrLandprepDisrupted, districts, 'deyr_landprep_ha');
-var deyrSowingDistrict = sumAreaByDistrict(deyrSowingDisrupted, districts, 'deyr_sowing_ha');
-var deyrHarvestDistrict = sumAreaByDistrict(deyrHarvestDisrupted, districts, 'deyr_harvest_ha');
+var guGrowingDisplaced = ee.Number(
+  guGrowingDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
 
+var guHarvestDisplaced = ee.Number(
+  guHarvestDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
+
+var deyrLandprepDisplaced = ee.Number(
+  deyrLandprepDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
+
+var deyrSowingDisplaced = ee.Number(
+  deyrSowingDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
+
+var deyrGrowingDisplaced = ee.Number(
+  deyrGrowingDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
+
+var deyrHarvestDisplaced = ee.Number(
+  deyrHarvestDTMInAg.aggregate_sum('Total new arrivals since last week')
+);
+
+
+// =====================================================
+// 12. NATIONAL CONFLICT COUNTS DURING CALENDAR STAGES
+// =====================================================
+var guLandprepConflictCount = guLandprepConflict.size();
+var guSowingConflictCount   = guSowingConflict.size();
+var guGrowingConflictCount  = guGrowingConflict.size();
+var guHarvestConflictCount  = guHarvestConflict.size();
+
+var deyrLandprepConflictCount = deyrLandprepConflict.size();
+var deyrSowingConflictCount   = deyrSowingConflict.size();
+var deyrGrowingConflictCount  = deyrGrowingConflict.size();
+var deyrHarvestConflictCount  = deyrHarvestConflict.size();
+
+
+// =====================================================
+// 13. DISTRICT SUMMARY
+// =====================================================
 var districtSummary = districts.map(function(d) {
-  var adm2 = d.get('ADM2_NAME');
+  var districtName = d.get('ADM2_NAME');
+  var regionName = d.get('ADM1_NAME');
 
-  function getArea(fc) {
-    var m = fc.filter(ee.Filter.eq('ADM2_NAME', adm2)).first();
-    return ee.Number(ee.Algorithms.If(m, m.get('sum'), 0));
-  }
+  // DTM from agricultural areas by stage
+  var guLandprepPts = guLandprepDTMInAg.filterBounds(d.geometry());
+  var guSowingPts   = guSowingDTMInAg.filterBounds(d.geometry());
+  var guGrowingPts  = guGrowingDTMInAg.filterBounds(d.geometry());
+  var guHarvestPts  = guHarvestDTMInAg.filterBounds(d.geometry());
 
-  var guLandprepVal = getArea(guLandprepDistrict);
-  var guSowingVal = getArea(guSowingDistrict);
-  var guHarvestVal = getArea(guHarvestDistrict);
+  var deyrLandprepPts = deyrLandprepDTMInAg.filterBounds(d.geometry());
+  var deyrSowingPts   = deyrSowingDTMInAg.filterBounds(d.geometry());
+  var deyrGrowingPts  = deyrGrowingDTMInAg.filterBounds(d.geometry());
+  var deyrHarvestPts  = deyrHarvestDTMInAg.filterBounds(d.geometry());
 
-  var deyrLandprepVal = getArea(deyrLandprepDistrict);
-  var deyrSowingVal = getArea(deyrSowingDistrict);
-  var deyrHarvestVal = getArea(deyrHarvestDistrict);
+  // Conflict by stage
+  var guLandprepConf = guLandprepConflict.filterBounds(d.geometry());
+  var guSowingConf   = guSowingConflict.filterBounds(d.geometry());
+  var guGrowingConf  = guGrowingConflict.filterBounds(d.geometry());
+  var guHarvestConf  = guHarvestConflict.filterBounds(d.geometry());
 
-  var guConf = guSowingConflict.filterBounds(d.geometry());
-  var deyrConf = deyrSowingConflict.filterBounds(d.geometry());
+  var deyrLandprepConf = deyrLandprepConflict.filterBounds(d.geometry());
+  var deyrSowingConf   = deyrSowingConflict.filterBounds(d.geometry());
+  var deyrGrowingConf  = deyrGrowingConflict.filterBounds(d.geometry());
+  var deyrHarvestConf  = deyrHarvestConflict.filterBounds(d.geometry());
 
-  var guDtm = guSowingDTM.filterBounds(d.geometry());
-  var deyrDtm = deyrSowingDTM.filterBounds(d.geometry());
+  return d.set({
+    region_name: regionName,
+    district_name: districtName,
 
-  return d
-    .set('gu_landprep_disrupted_ha', guLandprepVal)
-    .set('gu_sowing_disrupted_ha', guSowingVal)
-    .set('gu_harvest_disrupted_ha', guHarvestVal)
-    .set('deyr_landprep_disrupted_ha', deyrLandprepVal)
-    .set('deyr_sowing_disrupted_ha', deyrSowingVal)
-    .set('deyr_harvest_disrupted_ha', deyrHarvestVal)
-    .set('gu_conflict_events_sowing', guConf.size())
-    .set('deyr_conflict_events_sowing', deyrConf.size())
-    .set('gu_displaced_sowing', guDtm.aggregate_sum('Total new arrivals since last week'))
-    .set('deyr_displaced_sowing', deyrDtm.aggregate_sum('Total new arrivals since last week'));
+    gu_landprep_displaced: guLandprepPts.aggregate_sum('Total new arrivals since last week'),
+    gu_sowing_displaced: guSowingPts.aggregate_sum('Total new arrivals since last week'),
+    gu_growing_displaced: guGrowingPts.aggregate_sum('Total new arrivals since last week'),
+    gu_harvest_displaced: guHarvestPts.aggregate_sum('Total new arrivals since last week'),
+
+    deyr_landprep_displaced: deyrLandprepPts.aggregate_sum('Total new arrivals since last week'),
+    deyr_sowing_displaced: deyrSowingPts.aggregate_sum('Total new arrivals since last week'),
+    deyr_growing_displaced: deyrGrowingPts.aggregate_sum('Total new arrivals since last week'),
+    deyr_harvest_displaced: deyrHarvestPts.aggregate_sum('Total new arrivals since last week'),
+
+    gu_landprep_conflict_events: guLandprepConf.size(),
+    gu_sowing_conflict_events: guSowingConf.size(),
+    gu_growing_conflict_events: guGrowingConf.size(),
+    gu_harvest_conflict_events: guHarvestConf.size(),
+
+    deyr_landprep_conflict_events: deyrLandprepConf.size(),
+    deyr_sowing_conflict_events: deyrSowingConf.size(),
+    deyr_growing_conflict_events: deyrGrowingConf.size(),
+    deyr_harvest_conflict_events: deyrHarvestConf.size()
+  });
 });
+
+
+// =====================================================
+// 14. DEBUGGING OUTPUTS
+// =====================================================
+print('Somalia districts', districts.limit(10));
+print('Cropland pixels count', cropland.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: somalia,
+  scale: 30,
+  maxPixels: 1e12
+}));
+
+print('GU active pixels count', guActive.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: somalia,
+  scale: 30,
+  maxPixels: 1e12
+}));
+
+print('DEYR active pixels count', deyrActive.reduceRegion({
+  reducer: ee.Reducer.count(),
+  geometry: somalia,
+  scale: 30,
+  maxPixels: 1e12
+}));
+
+print('GU landprep DTM count', guLandprepDTM.size());
+print('GU sowing DTM count', guSowingDTM.size());
+print('DEYR landprep DTM count', deyrLandprepDTM.size());
+print('DEYR sowing DTM count', deyrSowingDTM.size());
+
+print('GU landprep DTM in agriculture', guLandprepDTMInAg.size());
+print('GU sowing DTM in agriculture', guSowingDTMInAg.size());
+print('DEYR landprep DTM in agriculture', deyrLandprepDTMInAg.size());
+print('DEYR sowing DTM in agriculture', deyrSowingDTMInAg.size());
 
 
 // =====================================================
@@ -470,20 +492,26 @@ Map.addLayer(cropland, {palette: ['FFFF00']}, 'Cropland prior', false);
 Map.addLayer(guPeak, {min: 0.2, max: 0.8, palette: ['brown', 'yellow', 'green']}, 'GU NDVI peak', false);
 Map.addLayer(deyrPeak, {min: 0.2, max: 0.8, palette: ['brown', 'yellow', 'green']}, 'DEYR NDVI peak', false);
 
-// Key outputs
-Map.addLayer(guLandprepDisrupted, {palette: ['8B0000']}, 'GU land preparation disrupted', true);
-Map.addLayer(guSowingDisrupted, {palette: ['FF0000']}, 'GU sowing disrupted', true);
-Map.addLayer(guHarvestDisrupted, {palette: ['FFA500']}, 'GU harvest disrupted', false);
+Map.addLayer(districts.style({
+  color: 'white',
+  fillColor: '00000000',
+  width: 1
+}), {}, 'Somalia district boundaries', true);
 
-Map.addLayer(deyrLandprepDisrupted, {palette: ['4B0082']}, 'DEYR land preparation disrupted', false);
-Map.addLayer(deyrSowingDisrupted, {palette: ['800080']}, 'DEYR sowing disrupted', false);
-Map.addLayer(deyrHarvestDisrupted, {palette: ['DA70D6']}, 'DEYR harvest disrupted', false);
+// DTM agricultural-origin points by stage
+Map.addLayer(guLandprepDTMInAg, {color: '8B0000'}, 'GU landprep displaced from ag', false);
+Map.addLayer(guSowingDTMInAg, {color: 'FF0000'}, 'GU sowing displaced from ag', true);
+Map.addLayer(guGrowingDTMInAg, {color: 'FF8C00'}, 'GU growing displaced from ag', false);
+Map.addLayer(guHarvestDTMInAg, {color: 'FFD700'}, 'GU harvest displaced from ag', false);
 
-// Events
-Map.addLayer(guSowingConflict, {color: '000000'}, 'GU sowing conflict points', true);
-Map.addLayer(guSowingDTM, {color: '00FFFF'}, 'GU sowing displacement origin points', true);
-Map.addLayer(deyrSowingConflict, {color: '444444'}, 'DEYR sowing conflict points', false);
-Map.addLayer(deyrSowingDTM, {color: '00AAFF'}, 'DEYR sowing displacement origin points', false);
+Map.addLayer(deyrLandprepDTMInAg, {color: '4B0082'}, 'DEYR landprep displaced from ag', false);
+Map.addLayer(deyrSowingDTMInAg, {color: '800080'}, 'DEYR sowing displaced from ag', false);
+Map.addLayer(deyrGrowingDTMInAg, {color: 'BA55D3'}, 'DEYR growing displaced from ag', false);
+Map.addLayer(deyrHarvestDTMInAg, {color: 'DA70D6'}, 'DEYR harvest displaced from ag', false);
+
+// ACLED conflict points by stage
+Map.addLayer(guSowingConflict, {color: '000000'}, 'GU sowing conflict', true);
+Map.addLayer(deyrSowingConflict, {color: '444444'}, 'DEYR sowing conflict', false);
 
 
 // =====================================================
@@ -494,12 +522,12 @@ function addLegend() {
     style: {
       position: 'bottom-right',
       padding: '8px 12px',
-      width: '280px'
+      width: '300px'
     }
   });
 
   legend.add(ui.Label({
-    value: 'Agricultural calendar disruption',
+    value: 'Somalia agriculture and displacement',
     style: {fontWeight: 'bold', fontSize: '14px'}
   }));
 
@@ -513,14 +541,16 @@ function addLegend() {
     return ui.Panel([colorBox, desc], ui.Panel.Layout.Flow('horizontal'));
   }
 
-  legend.add(row('#8B0000', 'GU land preparation disrupted'));
-  legend.add(row('#FF0000', 'GU sowing disrupted'));
-  legend.add(row('#FFA500', 'GU harvest disrupted'));
-  legend.add(row('#4B0082', 'DEYR land preparation disrupted'));
-  legend.add(row('#800080', 'DEYR sowing disrupted'));
-  legend.add(row('#DA70D6', 'DEYR harvest disrupted'));
+  legend.add(row('#FFFFFF', 'District boundaries'));
+  legend.add(row('#FF0000', 'GU sowing displaced from ag'));
+  legend.add(row('#8B0000', 'GU landprep displaced from ag'));
+  legend.add(row('#FF8C00', 'GU growing displaced from ag'));
+  legend.add(row('#FFD700', 'GU harvest displaced from ag'));
+  legend.add(row('#800080', 'DEYR sowing displaced from ag'));
+  legend.add(row('#4B0082', 'DEYR landprep displaced from ag'));
+  legend.add(row('#BA55D3', 'DEYR growing displaced from ag'));
+  legend.add(row('#DA70D6', 'DEYR harvest displaced from ag'));
   legend.add(row('#000000', 'Conflict events'));
-  legend.add(row('#00FFFF', 'Displacement origin points'));
 
   Map.add(legend);
 }
@@ -533,28 +563,34 @@ addLegend();
 var panel = ui.Panel({
   style: {
     position: 'top-left',
-    width: '390px',
+    width: '420px',
     padding: '10px'
   }
 });
 
 panel.add(ui.Label({
-  value: 'Somalia agricultural calendar disruption',
+  value: 'Somalia agricultural displacement from farming areas',
   style: {fontWeight: 'bold', fontSize: '16px'}
 }));
 
-panel.add(ui.Label('Purpose: show disruption of farming calendar, not yield loss'));
+panel.add(ui.Label('Purpose: count displaced people from agricultural areas during key Gu and Deyr stages'));
 panel.add(ui.Label('Year: ' + SETTINGS.targetYear));
-panel.add(ui.Label('Buffer: ' + (SETTINGS.riskBufferMeters / 1000) + ' km'));
+panel.add(ui.Label('District boundary source: FAO GAUL level 2'));
 
-var l1 = ui.Label('GU land preparation disrupted area: loading...');
-var l2 = ui.Label('GU sowing disrupted area: loading...');
-var l3 = ui.Label('GU harvest disrupted area: loading...');
-var l4 = ui.Label('DEYR land preparation disrupted area: loading...');
-var l5 = ui.Label('DEYR sowing disrupted area: loading...');
-var l6 = ui.Label('DEYR harvest disrupted area: loading...');
-var l7 = ui.Label('GU displaced people from active ag areas during sowing: loading...');
-var l8 = ui.Label('DEYR displaced people from active ag areas during sowing: loading...');
+var l1 = ui.Label('GU land preparation displaced from ag areas: loading...');
+var l2 = ui.Label('GU sowing displaced from ag areas: loading...');
+var l3 = ui.Label('GU growing displaced from ag areas: loading...');
+var l4 = ui.Label('GU harvest displaced from ag areas: loading...');
+
+var l5 = ui.Label('DEYR land preparation displaced from ag areas: loading...');
+var l6 = ui.Label('DEYR sowing displaced from ag areas: loading...');
+var l7 = ui.Label('DEYR growing displaced from ag areas: loading...');
+var l8 = ui.Label('DEYR harvest displaced from ag areas: loading...');
+
+var c1 = ui.Label('GU land preparation conflict events: loading...');
+var c2 = ui.Label('GU sowing conflict events: loading...');
+var c3 = ui.Label('DEYR land preparation conflict events: loading...');
+var c4 = ui.Label('DEYR sowing conflict events: loading...');
 
 panel.add(l1);
 panel.add(l2);
@@ -564,39 +600,76 @@ panel.add(l5);
 panel.add(l6);
 panel.add(l7);
 panel.add(l8);
+panel.add(c1);
+panel.add(c2);
+panel.add(c3);
+panel.add(c4);
 
 Map.add(panel);
 
-guLandprepHa.evaluate(function(v) { l1.setValue('GU land preparation disrupted area: ' + Math.round(v || 0) + ' ha'); });
-guSowingHa.evaluate(function(v) { l2.setValue('GU sowing disrupted area: ' + Math.round(v || 0) + ' ha'); });
-guHarvestHa.evaluate(function(v) { l3.setValue('GU harvest disrupted area: ' + Math.round(v || 0) + ' ha'); });
+guLandprepDisplaced.evaluate(function(v) {
+  l1.setValue('GU land preparation displaced from ag areas: ' + Math.round(v || 0));
+});
+guSowingDisplaced.evaluate(function(v) {
+  l2.setValue('GU sowing displaced from ag areas: ' + Math.round(v || 0));
+});
+guGrowingDisplaced.evaluate(function(v) {
+  l3.setValue('GU growing displaced from ag areas: ' + Math.round(v || 0));
+});
+guHarvestDisplaced.evaluate(function(v) {
+  l4.setValue('GU harvest displaced from ag areas: ' + Math.round(v || 0));
+});
 
-deyrLandprepHa.evaluate(function(v) { l4.setValue('DEYR land preparation disrupted area: ' + Math.round(v || 0) + ' ha'); });
-deyrSowingHa.evaluate(function(v) { l5.setValue('DEYR sowing disrupted area: ' + Math.round(v || 0) + ' ha'); });
-deyrHarvestHa.evaluate(function(v) { l6.setValue('DEYR harvest disrupted area: ' + Math.round(v || 0) + ' ha'); });
+deyrLandprepDisplaced.evaluate(function(v) {
+  l5.setValue('DEYR land preparation displaced from ag areas: ' + Math.round(v || 0));
+});
+deyrSowingDisplaced.evaluate(function(v) {
+  l6.setValue('DEYR sowing displaced from ag areas: ' + Math.round(v || 0));
+});
+deyrGrowingDisplaced.evaluate(function(v) {
+  l7.setValue('DEYR growing displaced from ag areas: ' + Math.round(v || 0));
+});
+deyrHarvestDisplaced.evaluate(function(v) {
+  l8.setValue('DEYR harvest displaced from ag areas: ' + Math.round(v || 0));
+});
 
-guDisplacedPeople.evaluate(function(v) { l7.setValue('GU displaced people from active ag areas during sowing: ' + Math.round(v || 0)); });
-deyrDisplacedPeople.evaluate(function(v) { l8.setValue('DEYR displaced people from active ag areas during sowing: ' + Math.round(v || 0)); });
+guLandprepConflictCount.evaluate(function(v) {
+  c1.setValue('GU land preparation conflict events: ' + Math.round(v || 0));
+});
+guSowingConflictCount.evaluate(function(v) {
+  c2.setValue('GU sowing conflict events: ' + Math.round(v || 0));
+});
+deyrLandprepConflictCount.evaluate(function(v) {
+  c3.setValue('DEYR land preparation conflict events: ' + Math.round(v || 0));
+});
+deyrSowingConflictCount.evaluate(function(v) {
+  c4.setValue('DEYR sowing conflict events: ' + Math.round(v || 0));
+});
 
 
 // =====================================================
 // 18. PRINT OUTPUTS
 // =====================================================
-print('GU sowing conflict events', guSowingConflict.limit(10));
-print('GU sowing displacement points', guSowingDTM.limit(10));
 print('District summary', districtSummary.limit(50));
 
-print('GU land preparation disrupted area (ha)', guLandprepHa);
-print('GU sowing disrupted area (ha)', guSowingHa);
-print('GU harvest disrupted area (ha)', guHarvestHa);
+print('GU land preparation displaced from agricultural areas', guLandprepDisplaced);
+print('GU sowing displaced from agricultural areas', guSowingDisplaced);
+print('GU growing displaced from agricultural areas', guGrowingDisplaced);
+print('GU harvest displaced from agricultural areas', guHarvestDisplaced);
 
-print('DEYR land preparation disrupted area (ha)', deyrLandprepHa);
-print('DEYR sowing disrupted area (ha)', deyrSowingHa);
-print('DEYR harvest disrupted area (ha)', deyrHarvestHa);
+print('DEYR land preparation displaced from agricultural areas', deyrLandprepDisplaced);
+print('DEYR sowing displaced from agricultural areas', deyrSowingDisplaced);
+print('DEYR growing displaced from agricultural areas', deyrGrowingDisplaced);
+print('DEYR harvest displaced from agricultural areas', deyrHarvestDisplaced);
+
+print('GU land preparation conflict events', guLandprepConflictCount);
+print('GU sowing conflict events', guSowingConflictCount);
+print('DEYR land preparation conflict events', deyrLandprepConflictCount);
+print('DEYR sowing conflict events', deyrSowingConflictCount);
 
 
 // =====================================================
-// 19. MAP CLICK
+// 19. MAP CLICK: DISTRICT INSPECTION
 // =====================================================
 Map.onClick(function(coords) {
   var pt = ee.Geometry.Point([coords.lon, coords.lat]);
@@ -615,56 +688,56 @@ Map.onClick(function(coords) {
 // =====================================================
 // 20. EXPORTS
 // =====================================================
-Export.image.toDrive({
-  image: guLandprepDisrupted,
-  description: 'Somalia_GU_Landprep_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
-});
-
-Export.image.toDrive({
-  image: guSowingDisrupted,
-  description: 'Somalia_GU_Sowing_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
-});
-
-Export.image.toDrive({
-  image: guHarvestDisrupted,
-  description: 'Somalia_GU_Harvest_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
-});
-
-Export.image.toDrive({
-  image: deyrLandprepDisrupted,
-  description: 'Somalia_DEYR_Landprep_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
-});
-
-Export.image.toDrive({
-  image: deyrSowingDisrupted,
-  description: 'Somalia_DEYR_Sowing_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
-});
-
-Export.image.toDrive({
-  image: deyrHarvestDisrupted,
-  description: 'Somalia_DEYR_Harvest_Disrupted_' + SETTINGS.targetYear,
-  region: somalia,
-  scale: SETTINGS.scale,
-  maxPixels: 1e13
+Export.table.toDrive({
+  collection: districtSummary,
+  description: 'Somalia_District_Ag_Displacement_Conflict_Summary_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
 });
 
 Export.table.toDrive({
-  collection: districtSummary,
-  description: 'Somalia_Agri_Calendar_Disruption_District_Summary_' + SETTINGS.targetYear,
+  collection: guLandprepDTMInAg,
+  description: 'Somalia_GU_Landprep_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: guSowingDTMInAg,
+  description: 'Somalia_GU_Sowing_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: guGrowingDTMInAg,
+  description: 'Somalia_GU_Growing_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: guHarvestDTMInAg,
+  description: 'Somalia_GU_Harvest_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: deyrLandprepDTMInAg,
+  description: 'Somalia_DEYR_Landprep_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: deyrSowingDTMInAg,
+  description: 'Somalia_DEYR_Sowing_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: deyrGrowingDTMInAg,
+  description: 'Somalia_DEYR_Growing_Displaced_From_Ag_' + SETTINGS.targetYear,
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: deyrHarvestDTMInAg,
+  description: 'Somalia_DEYR_Harvest_Displaced_From_Ag_' + SETTINGS.targetYear,
   fileFormat: 'CSV'
 });
