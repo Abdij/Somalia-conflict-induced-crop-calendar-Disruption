@@ -27,7 +27,7 @@
 // 1. USER SETTINGS
 // =====================================================
 var SETTINGS = {
-  targetYear: 2024,
+  targetYear: 2025,
   scale: 10,
   conflictBufferMeters: 5000,   // for visualization only if needed
 
@@ -42,22 +42,22 @@ var SETTINGS = {
 
   // Agricultural calendar windows
   gu: {
-    landprepStart: '2024-02-01',
-    landprepEnd:   '2024-03-31',
-    sowingStart:   '2024-04-01',
-    sowingEnd:     '2024-05-15',
-    growingStart:  '2024-05-16',
-    growingEnd:    '2024-07-31',
-    harvestStart:  '2024-08-01',
-    harvestEnd:    '2024-09-30'
+    landprepStart: '2025-02-01',
+    landprepEnd:   '2025-03-31',
+    sowingStart:   '2025-04-01',
+    sowingEnd:     '2025-05-15',
+    growingStart:  '2025-05-16',
+    growingEnd:    '2025-07-31',
+    harvestStart:  '2025-08-01',
+    harvestEnd:    '2025-09-30'
   },
 
   deyr: {
-    landprepStart: '2024-09-01',
-    landprepEnd:   '2024-10-15',
-    sowingStart:   '2024-10-16',
-    sowingEnd:     '2024-11-30',
-    growingStart:  '2024-12-01',
+    landprepStart: '2025-09-01',
+    landprepEnd:   '2025-10-15',
+    sowingStart:   '2025-10-16',
+    sowingEnd:     '2025-11-30',
+    growingStart:  '2025-12-01',
     growingEnd:    '2025-01-31',
     harvestStart:  '2025-02-01',
     harvestEnd:    '2025-03-31'
